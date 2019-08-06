@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-
-import sys
-import os
-import json
-import zipfile
-import xmltodict
-import collections
-import datetime
-import pandas as pd
 import argparse
+import collections
+import functools
+import json
 import logging
+import operator
+import os
+import sys
+import xml.etree.cElementTree as ET
+import zipfile
 from multiprocessing import cpu_count, Pool
+
+import ciso8601
+import pandas as pd
+import xmltodict
 from elasticsearch import helpers, Elasticsearch
 
 # hide ES log
@@ -25,52 +28,142 @@ logging.basicConfig(filename="mans_to_es.log", level=logging.DEBUG, format=FORMA
 type_name = {
     "persistence": {
         "key": "PersistenceItem",
-        "datefield": [
+        "keys": [
+            "PersistenceType",
+            "RegPath",
+            "RegText",
+            "RegOwner",
+            "RegModified",
+            "FilePath",
+            "FileOwner",
+            "FileCreated",
+            "FileModified",
+            "FileAccessed",
+            "FileChanged",
+            "SignatureExists",
+            "SignatureVerified",
+            "SignatureDescription",
+            "CertificateSubject",
+            "CertificateIssuer",
+            "md5sum",
+            "FileItem",
+            "RegistryItem",
+            "RegContext",
+            "RegValue",
+            "ServicePath",
+            "ServiceName",
+            "descriptiveName",
+            "arguments",
+            "mode",
+            "startedAs",
+            "status",
+            "pathSignatureExists",
+            "pathSignatureVerified",
+            "pathSignatureDescription",
+            "pathCertificateSubject",
+            "pathCertificateIssuer",
+            "pathmd5sum",
+            "ServiceItem",
+            "serviceDLL",
+            "serviceDLLSignatureExists",
+            "serviceDLLSignatureVerified",
+            "serviceDLLSignatureDescription",
+            "serviceDLLCertificateSubject",
+            "serviceDLLCertificateIssuer",
+            "serviceDLLmd5sum",
+            "LinkFilePath",
+        ],
+        "datefields": [
             "RegModified",
             "FileCreated",
             "FileModified",
             "FileAccessed",
             "FileChanged",
         ],
-        "message_fields": [
-            ["RegPath"],
-            ["FilePath"],
-            ["FilePath"],
-            ["FilePath"],
-            ["FilePath"],
-        ],
+        "message_fields": {
+            "RegModified": ["RegPath"],
+            "FileCreated": ["FilePath"],
+            "FileModified": ["FilePath"],
+            "FileAccessed": ["FilePath"],
+            "FileChanged": ["FilePath"],
+        },
         "dateformat": "%Y-%m-%dT%H:%M:%SZ",
     },
     "processes-api": {
         "key": "ProcessItem",
-        "datefield": ["startTime"],
+        "keys": [
+            "pid",
+            "parentpid",
+            "path",
+            "name",
+            "arguments",
+            "Username",
+            "SecurityID",
+            "SecurityType",
+            "startTime",
+            "kernelTime",
+            "userTime",
+        ],
+        "datefields": ["startTime"],
         "dateformat": "%Y-%m-%dT%H:%M:%SZ",
-        "message_fields": [["name"]],
+        "message_fields": {"startTime": ["name"]},
     },
     "processes-memory": {
         "key": "ProcessItem",
-        "datefield": ["startTime"],
+        "keys": [
+            "pid",
+            "parentpid",
+            "path",
+            "name",
+            "arguments",
+            "Username",
+            "SecurityID",
+            "SecurityType",
+            "startTime",
+            "kernelTime",
+            "userTime",
+            "HandleList",
+            "SectionList",
+            "PortList",
+        ],
+        "datefields": ["startTime"],
         "dateformat": "%Y-%m-%dT%H:%M:%SZ",
-        "message_fields": [["name"]],
+        "message_fields": {"startTime": ["name"]},
     },
     "urlhistory": {
         "key": "UrlHistoryItem",
-        "datefield": ["LastVisitDate"],
+        "keys": [
+            "Profile",
+            "BrowserName",
+            "BrowserVersion",
+            "Username",
+            "URL",
+            "PageTitle",
+            "HostName",
+            "Hidden",
+            "Typed",
+            "LastVisitDate",
+            "VisitType",
+            "VisitCount",
+            "VisitFrom",
+            "FirstBookmarkDate",
+        ],
+        "datefields": ["LastVisitDate"],
         "dateformat": "%Y-%m-%dT%H:%M:%SZ",
-        "message_fields": [["URL"]],
+        "message_fields": {"LastVisitDate": ["URL"]},
     },
     "stateagentinspector": {
         "key": "eventItem",
-        "datefield": ["timestamp"],
+        "keys": ["timestamp", "eventType", "details"],
+        "datefields": ["timestamp"],
         "dateformat": "%Y-%m-%dT%H:%M:%S.%fZ",
         "subtypes": {
             "addressNotificationEvent": {
-                "meta": ["message", "address", "datetime", "timestamp_desc"],
+                "meta": ["address"],
                 "message_fields": ["address"],
             },
             "regKeyEvent": {
                 "meta": [
-                    "message",
                     "hive",
                     "keyPath",
                     "path",
@@ -78,14 +171,11 @@ type_name = {
                     "process",
                     "processPath",
                     "username",
-                    "datetime",
-                    "timestamp_desc",
                 ],
                 "message_fields": ["keyPath"],
             },
             "ipv4NetworkEvent": {
                 "meta": [
-                    "message",
                     "localIP",
                     "localPort",
                     "pid",
@@ -95,15 +185,12 @@ type_name = {
                     "remoteIP",
                     "remotePort",
                     "username",
-                    "datetime",
-                    "timestamp_desc",
                 ],
                 "message_fields": ["localIP", "remoteIP"],
                 "hits_key": "EXC",
             },
             "processEvent": {
                 "meta": [
-                    "message",
                     "md5",
                     "parentPid",
                     "parentProcess",
@@ -114,8 +201,6 @@ type_name = {
                     "processPath",
                     "startTime",
                     "username",
-                    "datetime",
-                    "timestamp_desc",
                     "eventType",
                 ],
                 "message_fields": ["process", "eventType"],
@@ -125,7 +210,6 @@ type_name = {
                 "meta": [
                     "devicePath",
                     "drive",
-                    "message",
                     "fileExtension",
                     "fileName",
                     "filePath",
@@ -134,8 +218,6 @@ type_name = {
                     "process",
                     "processPath",
                     "username",
-                    "datetime",
-                    "timestamp_desc",
                 ],
                 "message_fields": ["fileName"],
             },
@@ -145,7 +227,6 @@ type_name = {
                     "dataAtLowestOffset",
                     "devicePath",
                     "drive",
-                    "message",
                     "fileExtension",
                     "fileName",
                     "filePath",
@@ -160,28 +241,16 @@ type_name = {
                     "textAtLowestOffset",
                     "username",
                     "writes",
-                    "datetime",
-                    "timestamp_desc",
                 ],
                 "message_fields": ["fileName"],
                 "hits_key": "PRE",
             },
             "dnsLookupEvent": {
-                "meta": [
-                    "message",
-                    "hostname",
-                    "pid",
-                    "process",
-                    "processPath",
-                    "username",
-                    "datetime",
-                    "timestamp_desc",
-                ],
+                "meta": ["hostname", "pid", "process", "processPath", "username"],
                 "message_fields": ["hostname"],
             },
             "urlMonitorEvent": {
                 "meta": [
-                    "message",
                     "hostname",
                     "requestUrl",
                     "urlMethod",
@@ -194,8 +263,6 @@ type_name = {
                     "process",
                     "processPath",
                     "username",
-                    "datetime",
-                    "timestamp_desc",
                 ],
                 "message_fields": ["requestUrl"],
             },
@@ -203,15 +270,166 @@ type_name = {
     },
     "prefetch": {
         "key": "PrefetchItem",
-        "datefield": ["LastRun", "Created"],
+        "keys": [
+            "FullPath",
+            "Created",
+            "SizeInBytes",
+            "PrefetchHash",
+            "ReportedSizeInBytes",
+            "ApplicationFileName",
+            "LastRun",
+            "TimesExecuted",
+            "AccessedFileList",
+            "ApplicationFullPath",
+            "VolumeList",
+        ],
+        "datefields": ["LastRun", "Created"],
         "dateformat": "%Y-%m-%dT%H:%M:%SZ",
-        "message_fields": [["ApplicationFileName"], ["ApplicationFileName"]],
+        "message_fields": {
+            "LastRun": ["ApplicationFileName"],
+            "Created": ["ApplicationFileName"],
+        },
     },
     "filedownloadhistory": {
         "key": "FileDownloadHistoryItem",
-        "datefield": ["LastModifiedDate", "LastAccessedDate", "StartDate", "EndDate"],
+        "keys": [
+            "Profile",
+            "BrowserName",
+            "BrowserVersion",
+            "Username",
+            "DownloadType",
+            "BytesDownloaded",
+            "MaxBytes",
+            "SourceURL",
+            "TargetDirectory",
+            "EndDate",
+            "FileName",
+            "StartDate",
+            "State",
+            "CacheHitCount",
+            "LastModifiedDate",
+            "CacheFlags",
+            "LastCheckedDate",
+            "FullHttpHeader",
+            "LastAccessedDate",
+        ],
+        "datefields": ["LastModifiedDate", "LastAccessedDate", "StartDate", "EndDate"],
         "dateformat": "%Y-%m-%dT%H:%M:%SZ",
-        "message_fields": [["SourceURL"], ["SourceURL"], ["SourceURL"], ["SourceURL"]],
+        "message_fields": {
+            "LastModifiedDate": ["SourceURL"],
+            "LastAccessedDate": ["SourceURL"],
+            "StartDate": ["SourceURL"],
+            "EndDate": ["SourceURL"],
+        },
+    },
+    "files-raw": {
+        "key": "FileItem",
+        "keys": [
+            "DevicePath",
+            "FullPath",
+            "Drive",
+            "FileName",
+            "Username",
+            "SecurityID",
+            "SecurityType",
+            "SizeInBytes",
+            "Created",
+            "Modified",
+            "Accessed",
+            "Changed",
+            "FilenameCreated",
+            "FilenameModified",
+            "FilenameAccessed",
+            "FilenameChanged",
+            "FileAttributes",
+            "INode",
+            "Md5sum",
+            "StreamList",
+            "FilePath",
+            "FileExtension",
+            "PEInfo",
+        ],
+        "datefields": ["Created", "Modified", "Accessed", "Changed"],
+        "dateformat": "%Y-%m-%dT%H:%M:%SZ",
+        "message_fields": {
+            "Created": ["FullPath"],
+            "Modified": ["FullPath"],
+            "Accessed": ["FullPath"],
+            "Changed": ["FullPath"],
+        },
+    },
+    "cookiehistory": {
+        "key": "CookieHistoryItem",
+        "keys": [
+            "Profile",
+            "BrowserName",
+            "BrowserVersion",
+            "Username",
+            "HostName",
+            "CookiePath",
+            "CookieName",
+            "CookieValue",
+            "IsSecure",
+            "IsHttpOnly",
+            "LastAccessedDate",
+            "ExpirationDate",
+            "FileName",
+            "LastModifiedDate",
+            "FilePath",
+            "CreationDate",
+            "CookieFlags",
+        ],
+        "datefields": ["LastAccessedDate", "ExpirationDate"],
+        "dateformat": "%Y-%m-%dT%H:%M:%SZ",
+        "message_fields": {
+            "LastAccessedDate": ["HostName"],
+            "ExpirationDate": ["HostName"],
+        },
+    },
+    "eventlogs": {
+        "key": "EventLogItem",
+        "keys": [
+            "log",
+            "source",
+            "index",
+            "EID",
+            "type",
+            "genTime",
+            "writeTime",
+            "machine",
+            "message",
+            "category",
+            "user",
+            "ExecutionProcessId",
+            "ExecutionThreadId",
+            "unformattedMessage",
+            "CorrelationActivityId",
+        ],
+        "datefields": ["genTime"],
+        "dateformat": "%Y-%m-%dT%H:%M:%SZ",
+        "message_fields": {"genTime": ["EID", "source", "type"]},
+    },
+    "registry-raw": {
+        "key": "RegistryItem",
+        "keys": [
+            "Username",
+            "SecurityID",
+            "Path",
+            "Hive",
+            "KeyPath",
+            "Type",
+            "Modified",
+            "NumSubKeys",
+            "NumValues",
+            "ValueName",
+            "Text",
+            "ReportedLengthInBytes",
+            "Value",
+            "detectedAnomaly",
+        ],
+        "datefields": ["Modified"],
+        "dateformat": "%Y-%m-%dT%H:%M:%SZ",
+        "message_fields": {"Modified": ["KeyPath"]},
     },
     "tasks": {"key": "TaskItem", "skip": True},
     "ports": {"key": "PortItem", "skip": True},
@@ -221,61 +439,85 @@ type_name = {
     "network-dns": {"key": "DnsEntryItem", "skip": True},
     "network-route": {"key": "RouteEntryItem", "skip": True},
     "network-arp": {"key": "ArpEntryItem", "skip": True},
-    "sysinfo": {"skip": True, "key": "SystemInfoItem"},
-    "registry-raw": {"key": "RegistryItem", "skip": True},
+    "sysinfo": {"key": "SystemInfoItem", "skip": True},
     "services": {"key": "ServiceItem", "skip": True},
+    "hivelist": {"key": "HiveItem", "skip": True},
+    "drivers-modulelist": {"key": "ModuleItem", "skip": True},
+    "drivers-signature": {"key": "DriverItem", "skip": True},
+    "formhistory": {"key": "FormHistoryItem", "skip": True},
+    "kernel-hookdetection": {"key": "HookItem", "skip": True},
 }
 
 
-def output_dict(details):
+def generate_df(fo, filetype, uid=False):
     """
-        Output_dict: details column in stateagentinspector df contains all the row info
-        In:
-            row: row of stateagentinspector file [could be a dict or a list of dict]
-            itemtype: stateagentinspector subtype
-        Out:
-            the details dict exploded in multiple columns
+        Generate dataframe from xml file
     """
-    detail = details.get("detail", [])
-    ret_value = {}
+    try:
+        _df = []
+        tree = ET.parse(fo)
+        root = tree.getroot()
+        type_dict = type_name[filetype]
+        message = filetype
+        for PI in root.findall(type_dict["key"]):
+            tmp_dict = {}
+            if uid:
+                tmp_dict["uid"] = PI.attrib["uid"]
+            for key in type_dict["keys"]:
+                if PI.find(key) is None:
+                    tmp_dict[key] = None
+                else:
+                    if key.endswith("List"):
+                        tmp_dict[key] = xmltodict.parse(
+                            ET.tostring(PI.find(key), "utf-8", method="xml"),
+                            xml_attribs=False,
+                        )[key]
+                    elif key.endswith("Item"):
+                        tmp_dict[key] = xmltodict.parse(
+                            ET.tostring(PI.find(key), "utf-8", method="xml"),
+                            xml_attribs=False,
+                        )[key]
+                    else:
+                        # stateagent has eventType as key in main xml and also in details subfield
+                        if key == "eventType":
+                            message = PI.find(key).text
+                            tmp_dict["subEvent"] = PI.find(key).text
+                        elif key == "details":
+                            detail_dict = xmltodict.parse(
+                                ET.tostring(PI.find(key), "utf-8", method="xml"),
+                                xml_attribs=False,
+                            )[key]["detail"]
+                            if type(detail_dict) == list:
+                                for i in detail_dict:
+                                    tmp_dict[i["name"]] = i["value"]
+                            elif type(detail_dict) in (collections.OrderedDict, dict):
+                                tmp_dict[detail_dict["name"]] = detail_dict["value"]
+                        else:
+                            tmp_dict[key] = PI.find(key).text
+            tmp_dict["message"] = message
+            tmp_dict["mainEvent"] = filetype
+            _df.append(tmp_dict)
+        return pd.DataFrame(_df), True
+    except ET.ParseError:
+        return None, False
 
-    if type(detail) in (collections.OrderedDict, dict):
-        ret_value[detail["name"]] = detail["value"]
-    elif type(detail) == list:
-        for i in detail:
-            ret_value[i["name"]] = i["value"]
-    return pd.Series(ret_value)
 
-
-def convert_date(argument, date_format="%Y-%m-%dT%H:%M:%S.%fZ"):
+def convert_both(argument):
     """
-        convert_date: parse date field and convert to es format
+        convert_both: parse date field and convert to it to proper
         in:
             argument: object to parse
-            date_format: format of the argument field
         out:
             parsed data
     """
     try:
-        d = datetime.datetime.strptime(argument, date_format)
-        iso_date = d.isoformat(timespec="seconds")
-        iso_date_new = iso_date + "+00:00"
-        return iso_date_new
-    except TypeError:
-        return None
-
-
-def convert_timestamp(argument, date_format="%Y-%m-%dT%H:%M:%S.%fZ"):
-    """
-        convert_timestamp: parse date field and convert to timestamp
-        in:
-            argument: object to parse
-            date_format: format of the argument field
-        out:
-            parsed data
-    """
-    d = datetime.datetime.strptime(argument, date_format)
-    return str(int(d.timestamp() * 1000000))
+        d = ciso8601.parse_datetime(argument)
+        return pd.Series(
+            [d.isoformat(timespec="seconds"), str(int(d.timestamp() * 1000000))]
+        )
+    except (ValueError, OSError):
+        logging.error("date %s not valid" % str(argument))
+        return pd.Series([None, None])
 
 
 class MansToEs:
@@ -300,41 +542,44 @@ class MansToEs:
         """
             Get hit and alert from hits.json file
         """
-        with open(os.path.join(self.folder_path, "hits.json"), "r") as f:
-            for x in json.load(f):
-                if x.get("data", {}).get("key", None):
-                    self.ioc_alerts.setdefault(
-                        x["data"]["key"]["event_type"], []
-                    ).append(x["data"]["key"]["event_id"])
-                elif x.get("data", {}).get("documents", None) or x.get("data", {}).get(
-                    "analysis_details", None
-                ):
-                    self.exd_alerts.append(
-                        {
-                            "source": x["source"],
-                            "resolution": x["resolution"],
-                            "process id": x["data"]["process_id"],
-                            "process name": x["data"]["process_name"],
-                            "alert_code": "XPL",
-                            "datetime": convert_date(
-                                x["data"]["earliest_detection_time"],
-                                date_format="%Y-%m-%dT%H:%M:%SZ",
-                            ),
-                            "timestamp": convert_timestamp(
-                                x["data"]["earliest_detection_time"],
-                                date_format="%Y-%m-%dT%H:%M:%SZ",
-                            ),
-                            "ALERT": True,
-                            "message": "PID: %s PROCESS: %s"
-                            % (str(x["data"]["process_id"]), x["data"]["process_name"]),
-                        }
-                    )
-        if len(self.exd_alerts) > 0:
-            es = Elasticsearch([self.es_info])
-            helpers.bulk(
-                es, self.exd_alerts, index=self.index, doc_type="generic_event"
-            )
-        logging.debug("alert collected")
+        if not os.path.exists(os.path.join(self.folder_path, "hits.json")):
+            logging.debug("Hits.json: missing")
+        else:
+            with open(os.path.join(self.folder_path, "hits.json"), "r") as f:
+                for x in json.load(f):
+                    if x.get("data", {}).get("key", None):
+                        self.ioc_alerts.setdefault(
+                            x["data"]["key"]["event_type"], []
+                        ).append(str(x["data"]["key"]["event_id"]))
+                    elif x.get("data", {}).get("documents", None) or x.get(
+                        "data", {}
+                    ).get("analysis_details", None):
+                        (alert_datetime, alert_timestamp) = convert_both(
+                            x["data"]["earliest_detection_time"]
+                        )
+                        self.exd_alerts.append(
+                            {
+                                "source": x["source"],
+                                "resolution": x["resolution"],
+                                "process id": x["data"]["process_id"],
+                                "process name": x["data"]["process_name"],
+                                "alert_code": "XPL",
+                                "datetime": alert_datetime,
+                                "timestamp": alert_timestamp,
+                                "ALERT": True,
+                                "message": "PID: %s PROCESS: %s"
+                                % (
+                                    str(x["data"]["process_id"]),
+                                    x["data"]["process_name"],
+                                ),
+                            }
+                        )
+            if len(self.exd_alerts) > 0:
+                es = Elasticsearch([self.es_info])
+                helpers.bulk(
+                    es, self.exd_alerts, index=self.index, doc_type="generic_event"
+                )
+            logging.debug("Hits.json: parsed")
 
     def extract_mans(self):
         """
@@ -357,164 +602,169 @@ class MansToEs:
                 for res in item["results"]:
                     if res["type"] == "application/xml":
                         self.filelist[item["generator"]].append(res["payload"])
-        logging.debug("Manifest.json parsed")
+        logging.debug("Manifest.json: parsed")
 
     def process(self):
         """
             Process all files contained in .mans extracted folder
         """
+        tasks = []
         for filetype in self.filelist.keys():
-
             # If filetype is new for now it's skipped
             if filetype not in type_name.keys():
-                logging.debug(
-                    "Filetype: %s not recognize. Send us a note! - SKIPPED"
-                    % type_name[filetype]["key"]
-                )
+                logging.debug("%s: not recognize. Send us a note! - SKIP" % filetype)
                 continue
-
             # Ignore items if not related to timeline
             # TODO: will use them in neo4j for relationship
             if type_name[filetype].get("skip", False):
-                logging.debug("Filetype: %s - SKIPPED" % type_name[filetype]["key"])
+                logging.debug("%s: SKIP" % filetype)
                 continue
-            logging.debug("Filetype: %s - START" % type_name[filetype]["key"])
-
             # Read all files related to the type
             for file in self.filelist[filetype]:
+                tasks.append((filetype, file))
+        with Pool(processes=self.cpu_count) as pool:
+            pool.starmap_async(self.process_file, tasks).get()
+        logging.debug("COMPLETED")
 
-                logging.debug("Opening %s [%s]" % (file, type_name[filetype]["key"]))
+    def process_file(self, filetype, file):
 
-                with open(
-                    os.path.join(self.folder_path, file), "r", encoding="utf8"
-                ) as f:
-                    df_xml = (
-                        xmltodict.parse(f.read())
-                        .get("itemList", {})
-                        .get(type_name[filetype]["key"], {})
-                    )
-                    if df_xml == {}:
-                        logging.debug("\tEmpty file - SKIPPED")
-                        continue
-                    df = pd.DataFrame(df_xml)
+        info = type_name[filetype]
 
-                # check all date field, if not present remove them, if all not valid skip
-                datefields = [
-                    x for x in type_name[filetype]["datefield"] if x in df.columns
-                ]
-                if len(datefields) == 0:
+        logging.debug("%s: %s opening" % (filetype, file))
+
+        df, valid = generate_df(
+            open(os.path.join(self.folder_path, file), "r", encoding="utf8"),
+            filetype,
+            filetype == "stateagentinspector",
+        )
+        logging.debug("%s: %s df created" % (filetype, file))
+
+        if not valid:
+            logging.error("%s: %s -- ERROR DURING XML READ" % (filetype, file))
+            return
+
+        # check all date field, if not present remove them, if all not valid skip
+        datefields = [x for x in info["datefields"] if x in df.columns]
+        if len(datefields) == 0:
+            logging.debug("%s: has no valid time field - SKIP" % filetype)
+            return
+
+        # if not valid date field drop them
+        df = df.dropna(axis=0, how="all", subset=datefields)
+        if df.empty:
+            logging.debug("%s: has no valid data in time field - SKIP" % filetype)
+            return
+
+        # melt multiple date fields
+        if len(datefields) > 1:
+            df = df.melt(
+                id_vars=[x for x in df.columns if x not in datefields],
+                var_name="datetype",
+                value_name="datetime",
+            )
+            # some of them could be null - delete them
+        else:
+            df["datetype"] = datefields[0]
+            df = df.rename(columns={datefields[0]: "datetime"})
+
+        df = df[df["datetime"].notnull()]
+
+        # convert datetime to default format
+        logging.debug("%s: %s convert date start" % (filetype, file))
+        df[["datetime", "timestamp"]] = df["datetime"].apply(lambda x: convert_both(x))
+        logging.debug("%s: %s convert date end" % (filetype, file))
+
+        if filetype == "stateagentinspector":
+
+            alert_ids = functools.reduce(
+                operator.iconcat, [x for x in self.ioc_alerts.values()], []
+            )
+            df = df.assign(
+                **{
+                    "source": None,
+                    "resolution": None,
+                    "ALERT": None,
+                    "alert_code": None,
+                }
+            )
+            df.loc[df["uid"].isin(alert_ids), ["source", "resolution", "ALERT"]] = [
+                "IOC",
+                "ALERT",
+                True,
+            ]
+
+            df.loc[df["uid"].isin(alert_ids), "alert_code"] = df.loc[
+                df["uid"].isin(alert_ids), "subEvent"
+            ].apply(lambda x: info["subtypes"].get(x, {}).get("hits_key", None))
+
+            logging.debug("%s: %s upload start" % (filetype, file))
+            # each subtype has different fields and message fields
+            for sb in df["subEvent"].unique():
+
+                # if it's new we cannot continue
+                if sb not in info["subtypes"].keys():
                     logging.debug(
-                        "Filetype: %s has no valid time field - SKIPPED"
-                        % type_name[filetype]["key"]
+                        "%s: %s -- new subtype found: %s. Send us a note!"
+                        % (filetype, file, sb)
                     )
                     continue
 
-                # if not valid date field drop them
-                df = df.dropna(axis=0, how="all", subset=datefields)
+                logging.debug("%s: %s subtype: %s" % (filetype, file, sb))
 
-                # stateagentinspector have in eventType the main subtype and in timestamp usually the relative time
-                if filetype == "stateagentinspector":
-                    df = df.rename(columns={"eventType": "message"})
-                    df["datetime"] = df["timestamp"].apply(lambda x: convert_date(x))
-                    df["timestamp"] = df["datetime"].apply(
-                        lambda x: convert_timestamp(
-                            x, date_format="%Y-%m-%dT%H:%M:%S+00:00"
+                # take only valid column for that subtype
+                subdf = df[df["subEvent"] == sb].reindex(
+                    columns=info["subtypes"][sb]["meta"]
+                    + [
+                        "message",
+                        "datetime",
+                        "timestamp_desc",
+                        "subEvent",
+                        "mainEvent",
+                        "datetype",
+                        "timestamp",
+                    ]
+                )
+
+                # add messages based on selected fields value
+                if info["subtypes"][sb].get("message_fields", None):
+                    subdf["message"] = subdf.apply(
+                        lambda row: " - ".join(
+                            [row["message"]]
+                            + [
+                                row[mf]
+                                for mf in info["subtypes"][sb]["message_fields"]
+                                if row[mf]
+                            ]
                         )
+                        + " [%s]" % row["datetype"],
+                        axis=1,
                     )
                 else:
-                    df["message"] = filetype
-                    # convert all export date fields to default format
-                    for datefield in datefields:
-                        df[datefield] = df[datefield].apply(
-                            lambda x: convert_date(x, type_name[filetype]["dateformat"])
-                        )
-                df = df.drop(["@created", "@sequence_num"], axis=1, errors="ignore")
-                logging.debug("\tPreprocessing done")
-
-                # stateagentinspector is big and converted in parallel
-                if filetype == "stateagentinspector":
-                    pieces = []
-
-                    for itemtype in [x for x in type_name[filetype]["subtypes"].keys()]:
-                        tmp_df = df[df.message == itemtype].reset_index()
-                        for i in range(0, len(tmp_df), self.bulk_size):
-                            pieces.append(
-                                (tmp_df.loc[i: i + self.bulk_size - 1, :], itemtype)
-                            )
-                    with Pool(processes=self.cpu_count) as pool:
-                        pool.starmap_async(
-                            self.explode_stateagentinspector, pieces
-                        ).get()
-                else:
-                    # explode if multiple date
-                    list_dd = []
-                    df_dd = pd.DataFrame()
-                    df_tmp = df[[x for x in df.columns if x not in datefields]]
-                    for index, x in enumerate(datefields):
-                        df_tmp2 = df_tmp.copy()
-                        df_tmp2["datetime"] = df[[x]]
-                        df_tmp2 = df_tmp2[df_tmp2["datetime"].notnull()]
-                        df_tmp2["timestamp"] = df_tmp2["datetime"].apply(
-                            lambda x: convert_timestamp(
-                                x, date_format="%Y-%m-%dT%H:%M:%S+00:00"
-                            )
-                        )
-                        if type_name[filetype].get("message_fields", None):
-                            for mf in type_name[filetype]["message_fields"][index]:
-                                df_tmp2["message"] += " - " + df_tmp2[mf]
-                        df_tmp2["message"] += " [%s]" % x
-                        list_dd.append(df_tmp2)
-                    df_dd = pd.concat(list_dd, sort=False)
-
-                    df_dd["timestamp_desc"] = df_dd["message"]
-                    self.to_elastic(df_dd)
-                logging.debug("\tUpload done")
-        logging.debug("completed")
-
-    def explode_stateagentinspector(self, edf, itemtype):
-        """
-            explode_stateagentinspector: parse stateagentinspector file
-            In: 
-                edf: piece of stateagentinspector file
-                itemtype: subtype of processes piece
-        """
-        subtype = type_name["stateagentinspector"]["subtypes"]
-
-        end = pd.concat(
-            [
-                edf,
-                edf.apply(
-                    lambda row: output_dict(row.details),
+                    subdf["message"] = subdf.apply(
+                        lambda row: row["message"] + " [%s]" % row["datetype"], axis=1
+                    )
+                subdf["timestamp_desc"] = subdf["message"]
+                self.to_elastic(subdf)
+            logging.debug("%s: %s upload done" % (filetype, file))
+        else:
+            # Add messages based on selected fields value
+            if info.get("message_fields", None):
+                df["message"] = df.apply(
+                    lambda row: " - ".join(
+                        [row["message"]]
+                        + [row[mf] for mf in info["message_fields"][row["datetype"]]]
+                    )
+                    + " [%s]" % row["datetype"],
                     axis=1,
-                    result_type="expand",
-                ),
-            ],
-            axis=1,
-        )
-
-        end[["source", "resolution", "ALERT", "alert_code"]] = end["@uid"].apply(
-            lambda x: pd.Series(
-                {
-                    "source": "IOC",
-                    "resolution": "ALERT",
-                    "ALERT": True,
-                    "alert_code": subtype[itemtype].get("hits_key", None),
-                }
-            )
-            if itemtype in self.ioc_alerts.keys()
-            and int(x) in self.ioc_alerts[itemtype]
-            else pd.Series(
-                {"source": None, "resolution": None, "ALERT": None, "alert_code": None}
-            )
-        )
-
-        end = end.drop(["details"], axis=1, errors="ignore")
-        if subtype[itemtype].get("message_fields", None):
-            for mf in subtype[itemtype]["message_fields"]:
-                end["message"] += " - " + end[mf]
-        end["timestamp_desc"] = end["message"]
-        self.to_elastic(end)
-        logging.debug("\t\tUpload part - done")
+                )
+            else:
+                df["message"] = df.apply(
+                    lambda row: row["message"] + " [%s]" % row["datetype"], axis=1
+                )
+            df["timestamp_desc"] = df["message"]
+            logging.debug("%s: %s upload start" % (filetype, file))
+            self.to_elastic(df)
+            logging.debug("%s: %s upload done" % (filetype, file))
 
     def to_elastic(self, end):
         """
@@ -525,7 +775,17 @@ class MansToEs:
         es = Elasticsearch([self.es_info])
         data = end.to_json(orient="records")
         data = json.loads(data)
-        helpers.bulk(es, data, index=self.index, doc_type="generic_event")
+        collections.deque(
+            helpers.parallel_bulk(
+                es,
+                data,
+                index=self.index,
+                doc_type="generic_event",
+                thread_count=self.cpu_count * 4,
+                chunk_size=self.bulk_size,
+            ),
+            maxlen=0,
+        )
 
 
 def main():

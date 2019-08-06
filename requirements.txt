@@ -1,3 +1,4 @@
+ciso8601
 certifi>=2017.7.27.1
 elasticsearch==7.0.2
 numpy==1.16.4
